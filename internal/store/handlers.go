@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -10,7 +11,8 @@ import (
 
 func (s *itemServer[T]) handleAddItem(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<21)
+	maxBytes := int64(2 << 21) // 4MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	var item T
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
@@ -27,7 +29,7 @@ func (s *itemServer[T]) handleAddItem(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *itemServer[T]) handleListItems(w http.ResponseWriter, r *http.Request) {
+func (s *itemServer[T]) handleListItems(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.Store.Elements())
 }
@@ -52,24 +54,35 @@ func (s *itemServer[T]) handleRegisterPeer(w http.ResponseWriter, r *http.Reques
 	defer r.Body.Close()
 	var peer Peer
 	if err := json.NewDecoder(r.Body).Decode(&peer); err != nil {
-		http.Error(w, "Invalid JSON payload for Peer", http.StatusBadRequest)
+		errMsg := fmt.Sprintf(
+			"%s. %s\n",
+			"Error: Invalid JSON payload for Peer",
+			"Expect Peer on form {\"host\":\"<hostname>\", \"port\": \"<portnumber>\"}\n",
+		)
+		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
+
+	// check that the received peer is not already known
+	for _, p := range s.peers {
+		if peer.Host == p.Host && peer.Port == p.Port {
+			w.WriteHeader(200)
+			return
+		}
+	}
+
 	s.peers = append(s.peers, peer)
 	w.WriteHeader(201)
 }
 
-func (s *itemServer[T]) handleListPeers(w http.ResponseWriter, r *http.Request) {
+func (s *itemServer[T]) handleListPeers(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(s.peers)
 }
 
-type Peer struct {
-	host string
-	port string
-}
+type digestSymbol = digestmaps.DigestSymbol
 
 type itemServer[T comparable] struct {
-	Store digestmaps.ReverseIndexStore[T, digestmaps.DigestSymbol]
+	Store digestmaps.ReverseIndexStore[T, digestSymbol]
 	peers []Peer
 }
 
@@ -82,6 +95,7 @@ func NewItemServer[T comparable]() *itemServer[T] {
 
 	server := &itemServer[T]{
 		Store: store,
+		peers: make([]Peer, 0),
 	}
 	return server
 }
