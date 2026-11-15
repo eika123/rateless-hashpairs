@@ -19,28 +19,36 @@ message ReconcileRequest {
   repeated CodedSymbol symbols = 2;
 }
 
-// CodedSymbol from Practical Rateless Set Reconciliation paper
-message CodedSymbol {
+
+message HashedSymbol {
   bytes symbol = 1;
   uint64 hash = 2;
-  int64 count = 3;
 }
-
+// CodedSymbol from Practical Rateless Set Reconciliation paper
+message CodedSymbol {
+  HashedSymbol hashed_symbol = 1;
+  int64 count = 2;
+}
 message ReconcileResponse {
   bool decoded = 1;
-  repeated bytes requested_digests = 2; // A \ B: responder wants from caller
-  repeated bytes available_digests = 3; // B \ A: caller wants from responder
+  repeated HashedSymbol requested_digests = 2; // A \ B: responder wants from caller
+  repeated HashedSymbol available_digests = 3; // B \ A: caller wants from responder
 }
 
 // --- Phase 2: Chunked Data Transfer (mirrors ifrit SyncFrame) ---
 
 message SyncFrame {
   oneof payload {
-    DataItemHeader data_header = 1;
-    DataItemChunk data_chunk   = 2;
-    DataItemEnd data_end       = 3;
-    SyncComplete complete      = 4;
+    WantDigests want_digests   = 1;
+    DataItemHeader data_header = 2;
+    DataItemChunk data_chunk   = 3;
+    DataItemEnd data_end       = 4;
+    SyncComplete complete      = 5;
   }
+}
+
+message WantDigests {
+  repeated bytes digests = 1;
 }
 
 message DataItemHeader {
