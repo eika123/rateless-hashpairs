@@ -1,7 +1,7 @@
 # Rateless hashpairs
 Simple demo with two processes reconciling strings, 
 from the paper [Practical Rateless Set Reconciliation](https://dl.acm.org/doi/10.1145/3651890.3672219).
-Can reconcile large amounts of strings, easily symmetric deltas of millions on localhost.
+Can reconcile large symmetric deltas, in the millions of items.
 
 Standalone two-process testbed for two-phase Rateless IBLT (RIBLT) set reconciliation over gRPC:
 1. **Phase 1 (`ReconcileDigests`)**: Streams RIBLT coded symbols to compute $A \setminus B$ and $B \setminus A$ digests.
