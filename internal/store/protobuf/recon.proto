@@ -2,7 +2,7 @@
 syntax = "proto3";
 
 package recon;
-option go_package = "use-riblt/internal/store/protobuf;reconpb";
+option go_package = "github.com/eika123/rateless-hashpairs/internal/store/protobuf;reconpb";
 
 service Reconciler {
   // Phase 1: Exchange only RIBLT coded symbols and compute A\B and B\A digests.

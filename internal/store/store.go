@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	reconpb "use-riblt/internal/store/protobuf"
+	reconpb "github.com/eika123/rateless-hashpairs/internal/store/protobuf"
 
 	"github.com/joonnna/ifrit/digestmaps"
 	"google.golang.org/grpc"

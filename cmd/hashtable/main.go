@@ -6,7 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"use-riblt/internal/store"
+	"github.com/eika123/rateless-hashpairs/internal/store"
 
 	// "https://github.com/yangl1996/riblt"
 	"encoding/json"

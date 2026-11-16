@@ -1,4 +1,4 @@
-module use-riblt
+module github.com/eika123/rateless-hashpairs
 
 go 1.27.1
 

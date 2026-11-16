@@ -8,7 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
-	reconpb "use-riblt/internal/store/protobuf"
+	reconpb "github.com/eika123/rateless-hashpairs/internal/store/protobuf"
 
 	"github.com/joonnna/ifrit/digestmaps"
 	"github.com/yangl1996/riblt"
