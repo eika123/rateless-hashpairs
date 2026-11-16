@@ -18,4 +18,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261110000943-09e21b237f2c // indirect
 )
 
-replace github.com/joonnna/ifrit => github.com/eika123/ifrit v0.0.0-20261112215735-8695069d3f06
+replace github.com/joonnna/ifrit => github.com/eika123/ifrit v0.0.0-20261116113829-192b543c2b75

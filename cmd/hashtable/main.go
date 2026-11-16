@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"use-riblt/internal/store"
 
@@ -84,14 +85,12 @@ func main() {
 	grpcPort := flag.Int("grpcPort", 8081, "./hashtable -grpcPort=8081")
 	flag.Parse()
 
-	stopCh := make(chan int, 2)
-	server := store.NewItemServer[string]()
-
-	go func() {
-		if err := server.Start(*httpPort, *grpcPort, stopCh); err != nil {
-			fmt.Printf("An error occurded: %s\n", err.Error())
-		}
-	}()
+	errCh, err := store.LaunchNewItemServer[string](*httpPort, *grpcPort)
+	if err != nil {
+		log.Fatal(err)
+	}
 	// waint on itemServer to stop
-	<-stopCh
+	if err := <-errCh; err != nil {
+		log.Fatal(err)
+	}
 }
