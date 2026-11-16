@@ -53,6 +53,14 @@ func (s *itemServer[T]) handleListItems(w http.ResponseWriter, _ *http.Request) 
 	json.NewEncoder(w).Encode(s.Store.Elements())
 }
 
+func (s *itemServer[T]) handleFingerprint(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"fingerprint": s.Store.Fingerprint(),
+		"size":        s.Store.Size(),
+	})
+}
+
 func (s *itemServer[T]) handleGetItem(w http.ResponseWriter, r *http.Request) {
 	raw := r.PathValue("digest")
 	parsed, err := strconv.ParseUint(raw, 10, 64)
@@ -135,6 +143,7 @@ func (s *itemServer[T]) ItemRoutes() http.Handler {
 	mux.HandleFunc("POST /items/batch", s.handleAddItemsBatch)
 	mux.HandleFunc("GET /items", s.handleListItems)
 	mux.HandleFunc("GET /items/{digest}", s.handleGetItem)
+	mux.HandleFunc("GET /fingerprint", s.handleFingerprint)
 	mux.HandleFunc("POST /peers", s.handleRegisterPeer)
 	mux.HandleFunc("GET /peers", s.handleListPeers)
 	mux.HandleFunc("POST /reconcile", s.handleReconcile)

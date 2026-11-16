@@ -81,12 +81,14 @@ async def ingest_both(
 
 
 def fetch_items(host: str, port: int, timeout_s: float = 600.0) -> set[str]:
-    conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
-    try:
+    with contextlib.closing(http.client.HTTPConnection(host, port, timeout=timeout_s)) as conn:
         data = request_json(conn, "GET", "/items")
         return set(data or [])
-    finally:
-        conn.close()
+
+
+def fetch_fingerprint(host: str, port: int, timeout_s: float = 600.0) -> dict:
+    with contextlib.closing(http.client.HTTPConnection(host, port, timeout=timeout_s)) as conn:
+        return request_json(conn, "GET", "/fingerprint")
 
 
 def main() -> int:
@@ -99,6 +101,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=600.0, help="HTTP request timeout in seconds (default: 600)")
     parser.add_argument("--batch-size", type=int, default=50000, help="Items per POST /items/batch request (default: 50000)")
     parser.add_argument("--ingest-workers", type=int, default=2, help="Concurrent HTTP connections per node during ingestion (default: 2)")
+    parser.add_argument("--verify-fingerprint", action="store_true", help="Verify equality via O(1) GET /fingerprint instead of fetching all items")
     args = parser.parse_args()
 
     if args.shared is None and args.only_a is None and args.only_b is None:
@@ -181,15 +184,27 @@ def main() -> int:
                     summaries = request_json(conn_a, "POST", "/reconcile")
                     rpc_elapsed = time.monotonic() - t1
 
-                    set_a = fetch_items("127.0.0.1", 18080, timeout_s=args.timeout)
-                    set_b = fetch_items("127.0.0.1", 18082, timeout_s=args.timeout)
+                    if args.verify_fingerprint:
+                        fp_a = fetch_fingerprint("127.0.0.1", 18080, timeout_s=args.timeout)
+                        fp_b = fetch_fingerprint("127.0.0.1", 18082, timeout_s=args.timeout)
+                        assert fp_a["fingerprint"] == fp_b["fingerprint"], (
+                            f"Fingerprint mismatch: A={fp_a['fingerprint']} B={fp_b['fingerprint']}"
+                        )
+                        assert fp_a["size"] == len(expected) and fp_b["size"] == len(expected), (
+                            f"Size mismatch: expected={len(expected)} A={fp_a['size']} B={fp_b['size']}"
+                        )
+                        total_elapsed = time.monotonic() - t1
+                        print(f"Reconciliation RPC finished in {rpc_elapsed:.3f}s; fingerprints & sizes ({len(expected)}) verified in {total_elapsed:.3f}s:")
+                    else:
+                        set_a = fetch_items("127.0.0.1", 18080, timeout_s=args.timeout)
+                        set_b = fetch_items("127.0.0.1", 18082, timeout_s=args.timeout)
 
-                    assert set_a == expected, f"Node A mismatch: missing={len(expected - set_a)}, extra={len(set_a - expected)}"
-                    assert set_b == expected, f"Node B mismatch: missing={len(expected - set_b)}, extra={len(set_b - expected)}"
-                    assert set_a == set_b, "Node A and Node B sets differ!"
-                    total_elapsed = time.monotonic() - t1
+                        assert set_a == expected, f"Node A mismatch: missing={len(expected - set_a)}, extra={len(set_a - expected)}"
+                        assert set_b == expected, f"Node B mismatch: missing={len(expected - set_b)}, extra={len(set_b - expected)}"
+                        assert set_a == set_b, "Node A and Node B sets differ!"
+                        total_elapsed = time.monotonic() - t1
+                        print(f"Reconciliation RPC finished in {rpc_elapsed:.3f}s; equal sets verified in {total_elapsed:.3f}s:")
 
-                    print(f"Reconciliation RPC finished in {rpc_elapsed:.3f}s; equal sets verified in {total_elapsed:.3f}s:")
                     print(json.dumps(summaries, indent=2))
                     print(f"PASS: Node A and Node B both hold all {len(expected)} identical UUIDs.")
 
