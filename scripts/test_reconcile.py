@@ -2,6 +2,7 @@
 """End-to-end test for two-phase RIBLT + gRPC Sync with thousands of UUIDs."""
 
 import argparse
+import asyncio
 import contextlib
 import http.client
 import json
@@ -42,13 +43,41 @@ def wait_ready(host: str, port: int, timeout_s: float = 5.0) -> None:
     raise TimeoutError(f"Timed out waiting for http://{host}:{port}/items")
 
 
-def insert_items(host: str, port: int, items: list[str], timeout_s: float = 600.0, batch_size: int = 5000) -> None:
-    conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
-    try:
-        for i in range(0, len(items), batch_size):
-            request_json(conn, "POST", "/items/batch", items[i : i + batch_size])
-    finally:
-        conn.close()
+def _insert_batches(host: str, port: int, batches: list[list[str]], timeout_s: float) -> None:
+    with contextlib.closing(http.client.HTTPConnection(host, port, timeout=timeout_s)) as conn:
+        for batch in batches:
+            request_json(conn, "POST", "/items/batch", batch)
+
+
+async def insert_items_async(
+    host: str,
+    port: int,
+    items: list[str],
+    timeout_s: float = 600.0,
+    batch_size: int = 50000,
+    workers: int = 2,
+) -> None:
+    if not items:
+        return
+    batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+    num_workers = max(1, min(workers, len(batches)))
+    worker_batches = [batches[i::num_workers] for i in range(num_workers)]
+    await asyncio.gather(
+        *(asyncio.to_thread(_insert_batches, host, port, wb, timeout_s) for wb in worker_batches)
+    )
+
+
+async def ingest_both(
+    items_a: list[str],
+    items_b: list[str],
+    timeout_s: float,
+    batch_size: int,
+    workers: int,
+) -> None:
+    await asyncio.gather(
+        insert_items_async("127.0.0.1", 18080, items_a, timeout_s, batch_size, workers),
+        insert_items_async("127.0.0.1", 18082, items_b, timeout_s, batch_size, workers),
+    )
 
 
 def fetch_items(host: str, port: int, timeout_s: float = 600.0) -> set[str]:
@@ -63,10 +92,13 @@ def fetch_items(host: str, port: int, timeout_s: float = 600.0) -> set[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Test RIBLT reconciliation across two nodes.")
     parser.add_argument("-n", "--count", type=int, default=8000, help="Total unique UUIDs when --shared/--only-a/--only-b are not set")
+    parser.add_argument("--delta", type=int, default=None, help="Fixed symmetric difference |A Δ B| when using --count")
     parser.add_argument("--shared", type=int, default=None, help="UUIDs present on both nodes")
     parser.add_argument("--only-a", type=int, default=None, help="UUIDs initially only on Node A")
     parser.add_argument("--only-b", type=int, default=None, help="UUIDs initially only on Node B")
     parser.add_argument("--timeout", type=float, default=600.0, help="HTTP request timeout in seconds (default: 600)")
+    parser.add_argument("--batch-size", type=int, default=50000, help="Items per POST /items/batch request (default: 50000)")
+    parser.add_argument("--ingest-workers", type=int, default=2, help="Concurrent HTTP connections per node during ingestion (default: 2)")
     args = parser.parse_args()
 
     if args.shared is None and args.only_a is None and args.only_b is None:
@@ -74,6 +106,16 @@ def main() -> int:
         rem = args.count - n_shared
         n_only_a = rem // 2
         n_only_b = rem - n_only_a
+        if args.delta is not None:
+            delta = min(args.delta, args.count)
+            n_shared = args.count - delta
+            n_only_a = delta // 2
+            n_only_b = delta - n_only_a
+        else:
+            n_shared = args.count // 4
+            rem = args.count - n_shared
+            n_only_a = rem // 2
+            n_only_b = rem - n_only_a
     else:
         n_shared = args.shared or 0
         n_only_a = args.only_a or 0
@@ -83,12 +125,13 @@ def main() -> int:
     root_dir = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory() as tmpdir:
         bin_path = os.path.join(tmpdir, "hashtable")
-        print("Building hashtable binary...")
+        print("Building hashtable binary...", end="")
         subprocess.run(
             ["go", "build", "-o", bin_path, "./cmd/hashtable"],
             cwd=root_dir,
             check=True,
         )
+        print("build done")
 
         log_a_path = os.path.join(tmpdir, "node-a.log")
         log_b_path = os.path.join(tmpdir, "node-b.log")
@@ -117,8 +160,15 @@ def main() -> int:
                 expected = set(shared) | set(only_a) | set(only_b)
 
                 t0 = time.monotonic()
-                insert_items("127.0.0.1", 18080, shared + only_a, timeout_s=args.timeout)
-                insert_items("127.0.0.1", 18082, shared + only_b, timeout_s=args.timeout)
+                asyncio.run(
+                    ingest_both(
+                        shared + only_a,
+                        shared + only_b,
+                        args.timeout,
+                        args.batch_size,
+                        args.ingest_workers,
+                    )
+                )
                 print(
                     f"Inserted {len(shared) + len(only_a)} items on Node A and "
                     f"{len(shared) + len(only_b)} items on Node B in {time.monotonic() - t0:.2f}s"
