@@ -91,7 +91,7 @@ def fetch_fingerprint(host: str, port: int, timeout_s: float = 600.0) -> dict:
         return request_json(conn, "GET", "/fingerprint")
 
 
-def main() -> int:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test RIBLT reconciliation across two nodes.")
     parser.add_argument("-n", "--count", type=int, default=8000, help="Total unique UUIDs when --shared/--only-a/--only-b are not set")
     parser.add_argument("--delta", type=int, default=None, help="Fixed symmetric difference |A Δ B| when using --count")
@@ -102,133 +102,119 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=50000, help="Items per POST /items/batch request (default: 50000)")
     parser.add_argument("--ingest-workers", type=int, default=2, help="Concurrent HTTP connections per node during ingestion (default: 2)")
     parser.add_argument("--verify-fingerprint", action="store_true", help="Verify equality via O(1) GET /fingerprint instead of fetching all items")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if args.shared is None and args.only_a is None and args.only_b is None:
-        n_shared = args.count // 4
-        rem = args.count - n_shared
-        n_only_a = rem // 2
-        n_only_b = rem - n_only_a
-        if args.delta is not None:
-            delta = min(args.delta, args.count)
-            n_shared = args.count - delta
-            n_only_a = delta // 2
-            n_only_b = delta - n_only_a
-        else:
-            n_shared = args.count // 4
-            rem = args.count - n_shared
-            n_only_a = rem // 2
-            n_only_b = rem - n_only_a
-    else:
-        n_shared = args.shared or 0
-        n_only_a = args.only_a or 0
-        n_only_b = args.only_b or 0
+
+def resolve_counts(args: argparse.Namespace) -> tuple[int, int, int]:
+    if args.shared is not None or args.only_a is not None or args.only_b is not None:
+        return args.shared or 0, args.only_a or 0, args.only_b or 0
+    if args.delta is not None:
+        delta = min(args.delta, args.count)
+        n_only_a = delta // 2
+        return args.count - delta, n_only_a, delta - n_only_a
+    n_shared = args.count // 4
+    rem = args.count - n_shared
+    n_only_a = rem // 2
+    return n_shared, n_only_a, rem - n_only_a
+
+
+def build_binary(root_dir: Path, tmpdir: str) -> str:
+    bin_path = os.path.join(tmpdir, "hashtable")
+    print("Building hashtable binary...", end="", flush=True)
+    subprocess.run(["go", "build", "-o", bin_path, "./cmd/hashtable"], cwd=root_dir, check=True)
+    print(" done")
+    return bin_path
+
+
+@contextlib.contextmanager
+def running_nodes(bin_path: str, tmpdir: str):
+    log_a_path = os.path.join(tmpdir, "node-a.log")
+    log_b_path = os.path.join(tmpdir, "node-b.log")
+    with (
+        open(log_a_path, "w", encoding="utf-8") as log_a,
+        open(log_b_path, "w", encoding="utf-8") as log_b,
+    ):
+        proc_a = subprocess.Popen([bin_path, "-httpPort=18080", "-grpcPort=18081"], stdout=log_a, stderr=subprocess.STDOUT)
+        proc_b = subprocess.Popen([bin_path, "-httpPort=18082", "-grpcPort=18083"], stdout=log_b, stderr=subprocess.STDOUT)
+        try:
+            wait_ready("127.0.0.1", 18080)
+            wait_ready("127.0.0.1", 18082)
+            yield
+        except Exception:
+            for label, path in (("node-a.log", log_a_path), ("node-b.log", log_b_path)):
+                try:
+                    content = Path(path).read_text(encoding="utf-8").strip()
+                    if content:
+                        print(f"\n--- {label} ---\n{content}", file=sys.stderr)
+                except OSError:
+                    pass
+            raise
+        finally:
+            for proc in (proc_a, proc_b):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+
+def verify_reconciled(expected: set[str], verify_fingerprint: bool, timeout_s: float) -> str:
+    if verify_fingerprint:
+        fp_a = fetch_fingerprint("127.0.0.1", 18080, timeout_s=timeout_s)
+        fp_b = fetch_fingerprint("127.0.0.1", 18082, timeout_s=timeout_s)
+        assert fp_a["fingerprint"] == fp_b["fingerprint"], (
+            f"Fingerprint mismatch: A={fp_a['fingerprint']} B={fp_b['fingerprint']}"
+        )
+        assert fp_a["size"] == len(expected) and fp_b["size"] == len(expected), (
+            f"Size mismatch: expected={len(expected)} A={fp_a['size']} B={fp_b['size']}"
+        )
+        return f"fingerprints & sizes ({len(expected)})"
+
+    set_a = fetch_items("127.0.0.1", 18080, timeout_s=timeout_s)
+    set_b = fetch_items("127.0.0.1", 18082, timeout_s=timeout_s)
+    assert set_a == expected, f"Node A mismatch: missing={len(expected - set_a)}, extra={len(set_a - expected)}"
+    assert set_b == expected, f"Node B mismatch: missing={len(expected - set_b)}, extra={len(set_b - expected)}"
+    assert set_a == set_b, "Node A and Node B sets differ!"
+    return "equal sets"
+
+
+def main() -> int:
+    args = parse_args()
+    n_shared, n_only_a, n_only_b = resolve_counts(args)
     print(f"Running set reconciliation experiment with symmetric difference |delta(A, B)| = {n_only_a + n_only_b}")
 
     root_dir = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory() as tmpdir:
-        bin_path = os.path.join(tmpdir, "hashtable")
-        print("Building hashtable binary...", end="")
-        subprocess.run(
-            ["go", "build", "-o", bin_path, "./cmd/hashtable"],
-            cwd=root_dir,
-            check=True,
-        )
-        print("build done")
+        bin_path = build_binary(root_dir, tmpdir)
+        with running_nodes(bin_path, tmpdir):
+            shared = [str(uuid.uuid4()) for _ in range(n_shared)]
+            only_a = [str(uuid.uuid4()) for _ in range(n_only_a)]
+            only_b = [str(uuid.uuid4()) for _ in range(n_only_b)]
+            expected = set(shared) | set(only_a) | set(only_b)
 
-        log_a_path = os.path.join(tmpdir, "node-a.log")
-        log_b_path = os.path.join(tmpdir, "node-b.log")
-        with (
-            open(log_a_path, "w", encoding="utf-8") as log_a,
-            open(log_b_path, "w", encoding="utf-8") as log_b,
-        ):
-            proc_a = subprocess.Popen(
-                [bin_path, "-httpPort=18080", "-grpcPort=18081"],
-                stdout=log_a,
-                stderr=subprocess.STDOUT,
-            )
-            proc_b = subprocess.Popen(
-                [bin_path, "-httpPort=18082", "-grpcPort=18083"],
-                stdout=log_b,
-                stderr=subprocess.STDOUT,
-            )
+            t0 = time.monotonic()
+            asyncio.run(ingest_both(shared + only_a, shared + only_b, args.timeout, args.batch_size, args.ingest_workers))
+            print(f"Inserted {len(shared) + len(only_a)} items on Node A and {len(shared) + len(only_b)} items on Node B in {time.monotonic() - t0:.2f}s")
 
-            try:
-                wait_ready("127.0.0.1", 18080)
-                wait_ready("127.0.0.1", 18082)
+            with contextlib.closing(http.client.HTTPConnection("127.0.0.1", 18080, timeout=args.timeout)) as conn_a:
+                request_json(conn_a, "POST", "/peers", {"host": "127.0.0.1", "port": "18083"})
 
-                shared = [str(uuid.uuid4()) for _ in range(n_shared)]
-                only_a = [str(uuid.uuid4()) for _ in range(n_only_a)]
-                only_b = [str(uuid.uuid4()) for _ in range(n_only_b)]
-                expected = set(shared) | set(only_a) | set(only_b)
+                t1 = time.monotonic()
+                summaries = request_json(conn_a, "POST", "/reconcile")
+                rpc_elapsed = time.monotonic() - t1
 
-                t0 = time.monotonic()
-                asyncio.run(
-                    ingest_both(
-                        shared + only_a,
-                        shared + only_b,
-                        args.timeout,
-                        args.batch_size,
-                        args.ingest_workers,
-                    )
+                verified_what = verify_reconciled(expected, args.verify_fingerprint, args.timeout)
+                total_elapsed = time.monotonic() - t1
+
+                print(f"Reconciliation RPC finished in {rpc_elapsed:.3f}s; {verified_what} verified in {total_elapsed:.3f}s:")
+                print(json.dumps(summaries, indent=2))
+                print(f"PASS: Node A and Node B both hold all {len(expected)} identical UUIDs.")
+
+                noop = request_json(conn_a, "POST", "/reconcile")
+                assert noop[0]["digests_requested"] == 0 and noop[0]["digests_available"] == 0, (
+                    f"Expected 0 diff on second reconcile, got {noop}"
                 )
-                print(
-                    f"Inserted {len(shared) + len(only_a)} items on Node A and "
-                    f"{len(shared) + len(only_b)} items on Node B in {time.monotonic() - t0:.2f}s"
-                )
-
-                with contextlib.closing(http.client.HTTPConnection("127.0.0.1", 18080, timeout=args.timeout)) as conn_a:
-                    request_json(conn_a, "POST", "/peers", {"host": "127.0.0.1", "port": "18083"})
-
-                    t1 = time.monotonic()
-                    summaries = request_json(conn_a, "POST", "/reconcile")
-                    rpc_elapsed = time.monotonic() - t1
-
-                    if args.verify_fingerprint:
-                        fp_a = fetch_fingerprint("127.0.0.1", 18080, timeout_s=args.timeout)
-                        fp_b = fetch_fingerprint("127.0.0.1", 18082, timeout_s=args.timeout)
-                        assert fp_a["fingerprint"] == fp_b["fingerprint"], (
-                            f"Fingerprint mismatch: A={fp_a['fingerprint']} B={fp_b['fingerprint']}"
-                        )
-                        assert fp_a["size"] == len(expected) and fp_b["size"] == len(expected), (
-                            f"Size mismatch: expected={len(expected)} A={fp_a['size']} B={fp_b['size']}"
-                        )
-                        total_elapsed = time.monotonic() - t1
-                        print(f"Reconciliation RPC finished in {rpc_elapsed:.3f}s; fingerprints & sizes ({len(expected)}) verified in {total_elapsed:.3f}s:")
-                    else:
-                        set_a = fetch_items("127.0.0.1", 18080, timeout_s=args.timeout)
-                        set_b = fetch_items("127.0.0.1", 18082, timeout_s=args.timeout)
-
-                        assert set_a == expected, f"Node A mismatch: missing={len(expected - set_a)}, extra={len(set_a - expected)}"
-                        assert set_b == expected, f"Node B mismatch: missing={len(expected - set_b)}, extra={len(set_b - expected)}"
-                        assert set_a == set_b, "Node A and Node B sets differ!"
-                        total_elapsed = time.monotonic() - t1
-                        print(f"Reconciliation RPC finished in {rpc_elapsed:.3f}s; equal sets verified in {total_elapsed:.3f}s:")
-
-                    print(json.dumps(summaries, indent=2))
-                    print(f"PASS: Node A and Node B both hold all {len(expected)} identical UUIDs.")
-
-                    noop = request_json(conn_a, "POST", "/reconcile")
-                    assert noop[0]["digests_requested"] == 0 and noop[0]["digests_available"] == 0, (
-                        f"Expected 0 diff on second reconcile, got {noop}"
-                    )
-                    print("PASS: Second reconciliation confirmed 0 digest differences.")
-            except Exception:
-                for label, path in (("node-a.log", log_a_path), ("node-b.log", log_b_path)):
-                    try:
-                        content = Path(path).read_text(encoding="utf-8").strip()
-                        if content:
-                            print(f"\n--- {label} ---\n{content}", file=sys.stderr)
-                    except OSError:
-                        pass
-                raise
-            finally:
-                for proc in (proc_a, proc_b):
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
+                print("PASS: Second reconciliation confirmed 0 digest differences.")
 
     return 0
 
