@@ -80,3 +80,15 @@ curl -X POST http://localhost:8080/reconcile
 curl http://localhost:8080/items
 curl http://localhost:8082/items
 ```
+
+## HTTP API
+
+| Method & Path | Request Body | Response |
+| --- | --- | --- |
+| `POST /items` | JSON value (e.g. `"Alice"`) | `201`/`200` `{"digest": <uint64>, "added": <bool>}` |
+| `POST /items/batch` | JSON array (e.g. `["Bob","Cynthia"]`, up to 4 MB) | `201`/`200` `{"added": <int>}` |
+| `GET /items` | — | `200` JSON array of all stored items |
+| `GET /items/{digest}` | — | `200` JSON item for the `uint64` digest, or `404` |
+| `POST /peers` | `{"host": "<addr>", "port": "<grpcPort>"}` | `201` (new) or `200` (already registered) |
+| `GET /peers` | — | `200` JSON array of registered peers |
+| `POST /reconcile` | — | `200` JSON array of `ReconcileSummary` per peer |
